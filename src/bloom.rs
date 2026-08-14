@@ -151,3 +151,63 @@ impl BloomFilter {
             num_hashes,
         })
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_false_negatives() {
+        let mut bf = BloomFilter::new(1000, 10);
+        let keys: Vec<Vec<u8>> = (0..1000u32).map(|i| i.to_le_bytes().to_vec()).collect();
+        for k in &keys {
+            bf.insert(k);
+        }
+        for k in &keys {
+            assert!(bf.might_contain(k), "false negative for key {k:?}");
+        }
+    }
+
+    #[test]
+    fn false_positive_rate_is_reasonable() {
+        // 10 bits/key should give a false-positive rate around 0.8-1% per the
+        // standard formula; assert it's well under a loose 5% bound so this
+        // doesn't flake, while still catching a broken implementation.
+        let n = 5000usize;
+        let mut bf = BloomFilter::new(n, 10);
+        for i in 0..n as u32 {
+            bf.insert(&i.to_le_bytes());
+        }
+        let mut false_positives = 0u32;
+        let trials = 20_000u32;
+        for i in 0..trials {
+            let probe = (i + 10_000_000).to_le_bytes(); // guaranteed not inserted
+            if bf.might_contain(&probe) {
+                false_positives += 1;
+            }
+        }
+        let rate = false_positives as f64 / trials as f64;
+        assert!(rate < 0.05, "false positive rate too high: {rate}");
+    }
+
+    #[test]
+    fn disabled_filter_always_says_maybe() {
+        let bf = BloomFilter::disabled();
+        assert!(bf.might_contain(b"anything"));
+        assert!(!bf.is_enabled());
+    }
+
+    #[test]
+    fn roundtrip_serialization() {
+        let mut bf = BloomFilter::new(100, 8);
+        for i in 0..100u32 {
+            bf.insert(&i.to_le_bytes());
+        }
+        let bytes = bf.serialize();
+        let bf2 = BloomFilter::deserialize(&bytes).unwrap();
+        for i in 0..100u32 {
+            assert!(bf2.might_contain(&i.to_le_bytes()));
+        }
+    }
+}
