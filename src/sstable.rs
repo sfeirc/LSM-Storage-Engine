@@ -294,3 +294,75 @@ impl SsTable {
         }
         Ok(None)
     }
+
+    /// Stream every `(key, value_or_tombstone)` in this table, in sorted
+    /// order — used by compaction's merge and by test/diagnostic helpers.
+    pub fn iter_all(&self) -> io::Result<SsTableIterator> {
+        let file = File::open(&self.path)?;
+        Ok(SsTableIterator {
+            file,
+            cursor: 0,
+            data_len: self.data_len,
+        })
+    }
+
+    pub fn size_on_disk_bytes(&self) -> u64 {
+        fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn bloom_is_enabled(&self) -> bool {
+        self.bloom.is_enabled()
+    }
+}
+
+fn read_entry_at_stream(
+    file: &mut File,
+    offset: u64,
+) -> io::Result<(Vec<u8>, Option<Vec<u8>>, u64)> {
+    file.seek(SeekFrom::Start(offset))?;
+    let mut len_buf = [0u8; 4];
+    file.read_exact(&mut len_buf)?;
+    let key_len = u32::from_le_bytes(len_buf) as usize;
+    file.read_exact(&mut len_buf)?;
+    let value_len_raw = u32::from_le_bytes(len_buf);
+
+    let mut key = vec![0u8; key_len];
+    file.read_exact(&mut key)?;
+
+    if value_len_raw == TOMBSTONE_SENTINEL {
+        let next = offset + 4 + 4 + key_len as u64;
+        Ok((key, None, next))
+    } else {
+        let mut value = vec![0u8; value_len_raw as usize];
+        file.read_exact(&mut value)?;
+        let next = offset + 4 + 4 + key_len as u64 + value_len_raw as u64;
+        Ok((key, Some(value), next))
+    }
+}
+
+pub struct SsTableIterator {
+    file: File,
+    cursor: u64,
+    data_len: u64,
+}
+
+impl Iterator for SsTableIterator {
+    type Item = io::Result<(Vec<u8>, Option<Vec<u8>>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor >= self.data_len {
+            return None;
+        }
+        match read_entry_at_stream(&mut self.file, self.cursor) {
+            Ok((key, value, next)) => {
+                self.cursor = next;
+                Some(Ok((key, value)))
+            }
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
