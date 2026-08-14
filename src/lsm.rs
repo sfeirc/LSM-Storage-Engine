@@ -106,3 +106,46 @@ fn discover_sstable_files(dir: &Path) -> io::Result<Vec<(u64, PathBuf)>> {
     found.sort_by_key(|(id, _)| *id);
     Ok(found)
 }
+
+impl LsmTree {
+    /// Open (creating if needed) an LSM-Tree rooted at `dir`. If `dir`
+    /// already contains SSTables and/or a WAL from a previous run, this is
+    /// where crash recovery happens: existing SSTables are re-indexed (no
+    /// data replay needed, they're immutable and were fsync'd+renamed
+    /// before ever becoming visible) and the WAL is replayed into a fresh
+    /// memtable to recover whatever writes hadn't been flushed yet.
+    pub fn open(dir: impl AsRef<Path>, opts: LsmOptions) -> io::Result<Self> {
+        let dir = dir.as_ref().to_path_buf();
+        fs::create_dir_all(&dir)?;
+
+        let sstable_files = discover_sstable_files(&dir)?;
+        let mut sstables = Vec::with_capacity(sstable_files.len());
+        let mut max_id: Option<u64> = None;
+        for (id, path) in sstable_files {
+            let table = SsTable::open(&path, id)?;
+            max_id = Some(max_id.map_or(id, |m| m.max(id)));
+            sstables.push(table);
+        }
+
+        let wal_path = dir.join("wal.log");
+        let records = Wal::replay(&wal_path)?;
+        let mut memtable = Memtable::new();
+        for record in records {
+            match record {
+                WalRecord::Put(k, v) => memtable.put(k, v),
+                WalRecord::Delete(k) => memtable.delete(k),
+            }
+        }
+        let wal = Wal::open(&wal_path, opts.wal_sync)?;
+
+        let next_sstable_id = max_id.map_or(0, |m| m + 1);
+
+        Ok(LsmTree {
+            dir,
+            memtable,
+            wal,
+            sstables,
+            next_sstable_id,
+            opts,
+        })
+    }
