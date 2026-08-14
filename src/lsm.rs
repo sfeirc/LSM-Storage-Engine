@@ -149,3 +149,35 @@ impl LsmTree {
             opts,
         })
     }
+
+    pub fn put(&mut self, key: &[u8], value: &[u8]) -> io::Result<()> {
+        self.wal
+            .append(&WalRecord::Put(key.to_vec(), value.to_vec()))?;
+        self.memtable.put(key.to_vec(), value.to_vec());
+        self.maybe_flush()
+    }
+
+    pub fn delete(&mut self, key: &[u8]) -> io::Result<()> {
+        self.wal.append(&WalRecord::Delete(key.to_vec()))?;
+        self.memtable.delete(key.to_vec());
+        self.maybe_flush()
+    }
+
+    pub fn get(&self, key: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        if let Some(value) = self.memtable.get(key) {
+            return Ok(value.clone());
+        }
+        for table in self.sstables.iter().rev() {
+            if let Some(value) = table.get(key)? {
+                return Ok(value);
+            }
+        }
+        Ok(None)
+    }
+
+    fn maybe_flush(&mut self) -> io::Result<()> {
+        if self.memtable.approx_size_bytes() >= self.opts.memtable_max_bytes {
+            self.flush()?;
+        }
+        Ok(())
+    }
