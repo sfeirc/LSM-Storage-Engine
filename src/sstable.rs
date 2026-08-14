@@ -366,3 +366,108 @@ impl Iterator for SsTableIterator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_simple(dir: &Path, id: u64, pairs: &[(&str, Option<&str>)]) -> SsTable {
+        let entries: Vec<(Vec<u8>, Option<Vec<u8>>)> = pairs
+            .iter()
+            .map(|(k, v)| (k.as_bytes().to_vec(), v.map(|s| s.as_bytes().to_vec())))
+            .collect();
+        SsTable::build(dir.join(format!("{id:06}.sst")), id, entries, 4, 10, true).unwrap()
+    }
+
+    #[test]
+    fn build_and_get_present_and_absent_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = build_simple(
+            dir.path(),
+            1,
+            &[
+                ("a", Some("1")),
+                ("b", Some("2")),
+                ("c", None),
+                ("d", Some("4")),
+            ],
+        );
+        assert_eq!(table.get(b"a").unwrap(), Some(Some(b"1".to_vec())));
+        assert_eq!(table.get(b"b").unwrap(), Some(Some(b"2".to_vec())));
+        assert_eq!(table.get(b"c").unwrap(), Some(None)); // tombstone
+        assert_eq!(table.get(b"d").unwrap(), Some(Some(b"4".to_vec())));
+        assert_eq!(table.get(b"zzz").unwrap(), None); // truly absent
+        assert_eq!(table.get(b"0").unwrap(), None); // before first key
+    }
+
+    #[test]
+    fn sparse_index_lookup_works_across_many_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let n = 500;
+        let entries: Vec<(Vec<u8>, Option<Vec<u8>>)> = (0..n)
+            .map(|i: u32| {
+                (
+                    format!("k{i:06}").into_bytes(),
+                    Some(format!("v{i}").into_bytes()),
+                )
+            })
+            .collect();
+        let table = SsTable::build(dir.path().join("t.sst"), 1, entries, 16, 10, true).unwrap();
+        for i in 0..n {
+            let key = format!("k{i:06}").into_bytes();
+            let expected = format!("v{i}").into_bytes();
+            assert_eq!(table.get(&key).unwrap(), Some(Some(expected)));
+        }
+        assert_eq!(table.get(b"k999999").unwrap(), None);
+    }
+
+    #[test]
+    fn reopen_after_close_preserves_lookups() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.sst");
+        {
+            let entries: Vec<(Vec<u8>, Option<Vec<u8>>)> = vec![
+                (b"a".to_vec(), Some(b"1".to_vec())),
+                (b"b".to_vec(), Some(b"2".to_vec())),
+            ];
+            SsTable::build(&path, 7, entries, 4, 10, true).unwrap();
+        }
+        let reopened = SsTable::open(&path, 7).unwrap();
+        assert_eq!(reopened.id, 7);
+        assert_eq!(reopened.get(b"a").unwrap(), Some(Some(b"1".to_vec())));
+        assert_eq!(reopened.get(b"b").unwrap(), Some(Some(b"2".to_vec())));
+    }
+
+    #[test]
+    fn iter_all_yields_sorted_entries_including_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = build_simple(
+            dir.path(),
+            1,
+            &[("a", Some("1")), ("b", None), ("c", Some("3"))],
+        );
+        let collected: Vec<(Vec<u8>, Option<Vec<u8>>)> = table
+            .iter_all()
+            .unwrap()
+            .collect::<io::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            collected,
+            vec![
+                (b"a".to_vec(), Some(b"1".to_vec())),
+                (b"b".to_vec(), None),
+                (b"c".to_vec(), Some(b"3".to_vec())),
+            ]
+        );
+    }
+
+    #[test]
+    fn bloom_disabled_still_correct_just_no_shortcut() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries: Vec<(Vec<u8>, Option<Vec<u8>>)> = vec![(b"a".to_vec(), Some(b"1".to_vec()))];
+        let table = SsTable::build(dir.path().join("t.sst"), 1, entries, 4, 10, false).unwrap();
+        assert!(!table.bloom_is_enabled());
+        assert_eq!(table.get(b"a").unwrap(), Some(Some(b"1".to_vec())));
+        assert_eq!(table.get(b"missing").unwrap(), None);
+    }
+}
