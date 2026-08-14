@@ -64,3 +64,48 @@ impl BloomFilter {
             num_hashes: 0,
         }
     }
+
+    fn positions(&self, key: &[u8]) -> impl Iterator<Item = u64> + '_ {
+        let h1 = fnv1a_64(SEED_1, key);
+        let h2 = fnv1a_64(SEED_2, key).wrapping_mul(2).wrapping_add(1); // ensure odd -> full cycle mod power-of-two-ish sizes
+        let num_bits = self.num_bits;
+        (0..self.num_hashes as u64).map(move |i| {
+            if num_bits == 0 {
+                0
+            } else {
+                h1.wrapping_add(i.wrapping_mul(h2)) % num_bits
+            }
+        })
+    }
+
+    pub fn insert(&mut self, key: &[u8]) {
+        if self.num_bits == 0 {
+            return;
+        }
+        let positions: Vec<u64> = self.positions(key).collect();
+        for pos in positions {
+            let word = (pos / 64) as usize;
+            let bit = pos % 64;
+            self.bits[word] |= 1u64 << bit;
+        }
+    }
+
+    /// `true` means "maybe present, go check"; `false` means "definitely
+    /// absent, skip the disk read entirely".
+    pub fn might_contain(&self, key: &[u8]) -> bool {
+        if self.num_bits == 0 {
+            return true; // disabled filter: never rules anything out
+        }
+        for pos in self.positions(key) {
+            let word = (pos / 64) as usize;
+            let bit = pos % 64;
+            if self.bits[word] & (1u64 << bit) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.num_bits > 0
+    }
