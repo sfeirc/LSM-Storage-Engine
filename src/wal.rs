@@ -195,3 +195,16 @@ impl Wal {
         }
         Ok(Some(record))
     }
+
+    /// Truncate this WAL back to empty (used right after a successful
+    /// memtable flush, since the WAL's contents are now durably captured in
+    /// the new SSTable and replaying them again would be redundant work —
+    /// not incorrect, since re-applying the same puts/deletes to an already
+    /// flushed memtable is idempotent, but unbounded WAL growth is not
+    /// something a real system tolerates).
+    pub fn truncate(&mut self) -> io::Result<()> {
+        self.file.set_len(0)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        Ok(())
+    }
+}
