@@ -263,3 +263,33 @@ impl LsmTree {
         self.sstables = vec![new_table];
         Ok(())
     }
+
+    // --- diagnostics, used by tests/benches; never on the correctness path ---
+
+    pub fn sstable_count(&self) -> usize {
+        self.sstables.len()
+    }
+
+    pub fn memtable_len(&self) -> usize {
+        self.memtable.len()
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Every raw (key, value-or-tombstone) entry currently stored across all
+    /// SSTables, tagged with which table it came from. Used by
+    /// `tests/tombstone.rs` to prove a deleted key's record is *physically*
+    /// gone after compaction, not merely masked.
+    pub fn debug_all_sstable_entries(&self) -> io::Result<Vec<SstableEntryDebug>> {
+        let mut out = Vec::new();
+        for table in &self.sstables {
+            for entry in table.iter_all()? {
+                let (k, v) = entry?;
+                out.push((table.id, k, v));
+            }
+        }
+        Ok(out)
+    }
+}
