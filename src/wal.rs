@@ -208,3 +208,71 @@ impl Wal {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn append_and_replay_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.log");
+        let mut wal = Wal::open(&path, true).unwrap();
+        wal.append(&WalRecord::Put(b"a".to_vec(), b"1".to_vec()))
+            .unwrap();
+        wal.append(&WalRecord::Put(b"b".to_vec(), b"2".to_vec()))
+            .unwrap();
+        wal.append(&WalRecord::Delete(b"a".to_vec())).unwrap();
+
+        let replayed = Wal::replay(&path).unwrap();
+        assert_eq!(
+            replayed,
+            vec![
+                WalRecord::Put(b"a".to_vec(), b"1".to_vec()),
+                WalRecord::Put(b"b".to_vec(), b"2".to_vec()),
+                WalRecord::Delete(b"a".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_or_missing_wal_replays_to_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.log");
+        assert_eq!(Wal::replay(&path).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn torn_tail_record_is_discarded_not_errored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.log");
+        {
+            let mut wal = Wal::open(&path, true).unwrap();
+            wal.append(&WalRecord::Put(b"a".to_vec(), b"1".to_vec()))
+                .unwrap();
+            wal.append(&WalRecord::Put(b"b".to_vec(), b"2".to_vec()))
+                .unwrap();
+        }
+        // Simulate a crash mid-write: chop off the last few bytes of the
+        // second record so it's incomplete.
+        let full = fs::read(&path).unwrap();
+        let torn = &full[..full.len() - 3];
+        fs::write(&path, torn).unwrap();
+
+        let replayed = Wal::replay(&path).unwrap();
+        assert_eq!(replayed, vec![WalRecord::Put(b"a".to_vec(), b"1".to_vec())]);
+    }
+
+    #[test]
+    fn truncate_resets_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.log");
+        let mut wal = Wal::open(&path, true).unwrap();
+        wal.append(&WalRecord::Put(b"a".to_vec(), b"1".to_vec()))
+            .unwrap();
+        wal.truncate().unwrap();
+        drop(wal);
+        assert_eq!(Wal::replay(&path).unwrap(), Vec::new());
+    }
+}
