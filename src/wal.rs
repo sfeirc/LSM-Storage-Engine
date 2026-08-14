@@ -46,3 +46,24 @@ fn fnv1a_32(data: &[u8]) -> u32 {
     }
     hash
 }
+
+fn encode(record: &WalRecord) -> Vec<u8> {
+    let mut buf = Vec::new();
+    match record {
+        WalRecord::Put(k, v) => {
+            buf.push(0u8);
+            buf.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            buf.extend_from_slice(k);
+            buf.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            buf.extend_from_slice(v);
+        }
+        WalRecord::Delete(k) => {
+            buf.push(1u8);
+            buf.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            buf.extend_from_slice(k);
+        }
+    }
+    let checksum = fnv1a_32(&buf);
+    buf.extend_from_slice(&checksum.to_le_bytes());
+    buf
+}
