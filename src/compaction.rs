@@ -118,3 +118,67 @@ pub fn merge_tables_dropping_tombstones(
 
     Ok(output)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn build(dir: &Path, id: u64, pairs: &[(&str, Option<&str>)]) -> SsTable {
+        let entries: Vec<(Vec<u8>, Option<Vec<u8>>)> = pairs
+            .iter()
+            .map(|(k, v)| (k.as_bytes().to_vec(), v.map(|s| s.as_bytes().to_vec())))
+            .collect();
+        SsTable::build(dir.join(format!("{id:06}.sst")), id, entries, 4, 10, true).unwrap()
+    }
+
+    #[test]
+    fn newer_table_wins_on_key_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        // newest first: table 0 has fresher "a", table 1 is older.
+        let newer = build(dir.path(), 2, &[("a", Some("new")), ("b", Some("2"))]);
+        let older = build(dir.path(), 1, &[("a", Some("old")), ("c", Some("3"))]);
+        let merged = merge_tables_dropping_tombstones(&[&newer, &older]).unwrap();
+        assert_eq!(
+            merged,
+            vec![
+                (b"a".to_vec(), b"new".to_vec()),
+                (b"b".to_vec(), b"2".to_vec()),
+                (b"c".to_vec(), b"3".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn tombstone_in_newest_table_drops_key_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        let newer = build(dir.path(), 2, &[("a", None)]);
+        let older = build(dir.path(), 1, &[("a", Some("old")), ("b", Some("2"))]);
+        let merged = merge_tables_dropping_tombstones(&[&newer, &older]).unwrap();
+        assert_eq!(merged, vec![(b"b".to_vec(), b"2".to_vec())]);
+    }
+
+    #[test]
+    fn merge_of_three_tables_with_overlapping_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let t3 = build(dir.path(), 3, &[("k2", Some("v2-newest"))]);
+        let t2 = build(dir.path(), 2, &[("k1", None), ("k2", Some("v2-mid"))]);
+        let t1 = build(
+            dir.path(),
+            1,
+            &[
+                ("k0", Some("v0")),
+                ("k1", Some("v1-old")),
+                ("k2", Some("v2-old")),
+            ],
+        );
+        let merged = merge_tables_dropping_tombstones(&[&t3, &t2, &t1]).unwrap();
+        assert_eq!(
+            merged,
+            vec![
+                (b"k0".to_vec(), b"v0".to_vec()),
+                (b"k2".to_vec(), b"v2-newest".to_vec()),
+            ]
+        );
+    }
+}
