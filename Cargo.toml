@@ -1,0 +1,41 @@
+[package]
+name = "lsm_storage_engine"
+version = "0.1.0"
+edition = "2021"
+description = "A from-scratch implementation of an LSM-Tree (Log-Structured Merge-Tree) key-value storage engine — the write-optimized architecture behind RocksDB, Cassandra, and LevelDB — with WAL durability, SSTables, sparse indexes, bloom filters, and compaction."
+license = "MIT"
+authors = ["Clovis SFEIR"]
+repository = "https://github.com/sfeirc/LSM-Storage-Engine"
+
+[lib]
+name = "lsm_storage_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lsm-cli"
+path = "src/main.rs"
+
+[[bin]]
+name = "crash_worker"
+path = "src/bin/crash_worker.rs"
+
+[dependencies]
+rand = "0.8"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+[[bench]]
+name = "lsm_bench"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"
+
+[profile.bench]
+opt-level = 3
+lto = true
