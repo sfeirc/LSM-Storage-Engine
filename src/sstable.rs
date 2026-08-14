@@ -63,3 +63,113 @@ fn encode_entry(buf: &mut Vec<u8>, key: &[u8], value: &Option<Vec<u8>>) {
         }
     }
 }
+
+impl SsTable {
+    /// Build a new SSTable file from an already-sorted, already-deduplicated
+    /// iterator of `(key, value_or_tombstone)` pairs (the memtable's sorted
+    /// iteration order, or a compaction merge's output order). Written to a
+    /// temp file and renamed into place atomically, so a crash mid-flush
+    /// never leaves a half-written file visible under `path`.
+    pub fn build<I>(
+        path: impl AsRef<Path>,
+        id: u64,
+        entries: I,
+        index_interval: usize,
+        bloom_bits_per_key: usize,
+        bloom_enabled: bool,
+    ) -> io::Result<SsTable>
+    where
+        I: IntoIterator<Item = (Vec<u8>, Option<Vec<u8>>)>,
+    {
+        let path = path.as_ref().to_path_buf();
+        let tmp_path = path.with_extension("sst.tmp");
+
+        let entries: Vec<(Vec<u8>, Option<Vec<u8>>)> = entries.into_iter().collect();
+        let mut bloom = if bloom_enabled {
+            BloomFilter::new(entries.len().max(1), bloom_bits_per_key)
+        } else {
+            BloomFilter::disabled()
+        };
+
+        let file = File::create(&tmp_path)?;
+        let mut writer = BufWriter::new(file);
+        let mut sparse_index = Vec::new();
+        let mut offset: u64 = 0;
+        let mut min_key = None;
+        let mut max_key = None;
+
+        for (i, (key, value)) in entries.iter().enumerate() {
+            if i % index_interval.max(1) == 0 {
+                sparse_index.push(SparseIndexEntry {
+                    key: key.clone(),
+                    offset,
+                });
+            }
+            if min_key.is_none() {
+                min_key = Some(key.clone());
+            }
+            max_key = Some(key.clone());
+
+            let mut buf =
+                Vec::with_capacity(8 + key.len() + value.as_ref().map(|v| v.len()).unwrap_or(0));
+            encode_entry(&mut buf, key, value);
+            writer.write_all(&buf)?;
+            offset += buf.len() as u64;
+
+            bloom.insert(key);
+        }
+        let data_len = offset;
+
+        // Index block.
+        let mut index_buf = Vec::new();
+        for entry in &sparse_index {
+            index_buf.extend_from_slice(&(entry.key.len() as u32).to_le_bytes());
+            index_buf.extend_from_slice(&entry.key);
+            index_buf.extend_from_slice(&entry.offset.to_le_bytes());
+        }
+        writer.write_all(&index_buf)?;
+        let index_len = index_buf.len() as u64;
+
+        // Meta block: max_key + entry_count, persisted explicitly so a
+        // reopen never needs to scan the data block to recover them.
+        let mut meta_buf = Vec::new();
+        match &max_key {
+            Some(k) => {
+                meta_buf.extend_from_slice(&(k.len() as u32).to_le_bytes());
+                meta_buf.extend_from_slice(k);
+            }
+            None => meta_buf.extend_from_slice(&0u32.to_le_bytes()),
+        }
+        meta_buf.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+        writer.write_all(&meta_buf)?;
+        let meta_len = meta_buf.len() as u64;
+
+        // Bloom block.
+        let bloom_buf = bloom.serialize();
+        writer.write_all(&bloom_buf)?;
+        let bloom_len = bloom_buf.len() as u64;
+
+        // Footer.
+        writer.write_all(&data_len.to_le_bytes())?;
+        writer.write_all(&index_len.to_le_bytes())?;
+        writer.write_all(&meta_len.to_le_bytes())?;
+        writer.write_all(&bloom_len.to_le_bytes())?;
+        writer.write_all(&MAGIC.to_le_bytes())?;
+
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        drop(writer);
+
+        fs::rename(&tmp_path, &path)?;
+
+        Ok(SsTable {
+            id,
+            path,
+            data_len,
+            sparse_index,
+            bloom,
+            entry_count: entries.len(),
+            min_key,
+            max_key,
+        })
+    }
