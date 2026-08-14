@@ -37,3 +37,11 @@ jobs:
         run: docker build -t lsm-storage-engine .
       - name: Smoke test
         run: docker run --rm lsm-storage-engine
+
+  benchmark-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run benchmarks (short, just confirm they execute)
+        run: cargo bench --bench lsm_bench -- --quick
