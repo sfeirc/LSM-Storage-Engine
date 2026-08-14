@@ -181,3 +181,37 @@ impl LsmTree {
         }
         Ok(())
     }
+
+    /// Force the current memtable to disk as a new SSTable, even if it
+    /// hasn't hit the size threshold yet. No-op if the memtable is empty.
+    pub fn flush(&mut self) -> io::Result<()> {
+        if self.memtable.is_empty() {
+            return Ok(());
+        }
+        let entries: Vec<(Vec<u8>, Option<Vec<u8>>)> = self
+            .memtable
+            .iter_sorted()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        let id = self.next_sstable_id;
+        self.next_sstable_id += 1;
+        let path = self.dir.join(sstable_file_name(id));
+        let table = SsTable::build(
+            &path,
+            id,
+            entries,
+            self.opts.sparse_index_interval,
+            self.opts.bloom_bits_per_key,
+            self.opts.bloom_enabled,
+        )?;
+        self.sstables.push(table);
+        self.memtable.clear();
+        // The WAL's contents are now durably captured in the SSTable that
+        // was just fsync'd; truncating avoids unbounded WAL growth and
+        // means a future crash only ever needs to replay writes since this
+        // point, not the whole history.
+        self.wal.truncate()?;
+
+        self.maybe_compact()
+    }
