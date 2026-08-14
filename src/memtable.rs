@@ -74,3 +74,46 @@ impl Memtable {
         self.approx_bytes = 0;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn put_then_get() {
+        let mut mt = Memtable::new();
+        mt.put(b"k".to_vec(), b"v".to_vec());
+        assert_eq!(mt.get(b"k"), Some(&Some(b"v".to_vec())));
+    }
+
+    #[test]
+    fn delete_records_tombstone_not_absence() {
+        let mut mt = Memtable::new();
+        mt.delete(b"k".to_vec());
+        assert_eq!(mt.get(b"k"), Some(&None));
+        assert_eq!(mt.get(b"other"), None);
+    }
+
+    #[test]
+    fn overwrite_updates_size_accounting() {
+        let mut mt = Memtable::new();
+        mt.put(b"k".to_vec(), b"short".to_vec());
+        let size_after_first = mt.approx_size_bytes();
+        mt.put(b"k".to_vec(), b"a-much-longer-value".to_vec());
+        let size_after_second = mt.approx_size_bytes();
+        assert!(size_after_second > size_after_first);
+        // Exactly one logical entry, size = key + latest value only.
+        assert_eq!(mt.len(), 1);
+        assert_eq!(size_after_second, b"k".len() + b"a-much-longer-value".len());
+    }
+
+    #[test]
+    fn iter_sorted_is_actually_sorted() {
+        let mut mt = Memtable::new();
+        for k in [b"c".to_vec(), b"a".to_vec(), b"b".to_vec()] {
+            mt.put(k.clone(), k);
+        }
+        let keys: Vec<&Vec<u8>> = mt.iter_sorted().map(|(k, _)| k).collect();
+        assert_eq!(keys, vec![&b"a".to_vec(), &b"b".to_vec(), &b"c".to_vec()]);
+    }
+}
