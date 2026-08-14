@@ -109,3 +109,45 @@ impl BloomFilter {
     pub fn is_enabled(&self) -> bool {
         self.num_bits > 0
     }
+
+    // --- serialization: [num_bits: u64][num_hashes: u32][word count: u64][words: u64 * n] ---
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(20 + self.bits.len() * 8);
+        buf.extend_from_slice(&self.num_bits.to_le_bytes());
+        buf.extend_from_slice(&self.num_hashes.to_le_bytes());
+        buf.extend_from_slice(&(self.bits.len() as u64).to_le_bytes());
+        for word in &self.bits {
+            buf.extend_from_slice(&word.to_le_bytes());
+        }
+        buf
+    }
+
+    pub fn deserialize(buf: &[u8]) -> std::io::Result<Self> {
+        use std::io::{Error, ErrorKind};
+        if buf.len() < 20 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "bloom filter buffer too short",
+            ));
+        }
+        let num_bits = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let num_hashes = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+        let word_count = u64::from_le_bytes(buf[12..20].try_into().unwrap()) as usize;
+        let mut bits = Vec::with_capacity(word_count);
+        let mut offset = 20;
+        for _ in 0..word_count {
+            if offset + 8 > buf.len() {
+                return Err(Error::new(ErrorKind::InvalidData, "bloom filter truncated"));
+            }
+            bits.push(u64::from_le_bytes(
+                buf[offset..offset + 8].try_into().unwrap(),
+            ));
+            offset += 8;
+        }
+        Ok(BloomFilter {
+            bits,
+            num_bits,
+            num_hashes,
+        })
+    }
