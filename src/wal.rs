@@ -67,3 +67,42 @@ fn encode(record: &WalRecord) -> Vec<u8> {
     buf.extend_from_slice(&checksum.to_le_bytes());
     buf
 }
+
+pub struct Wal {
+    path: PathBuf,
+    file: File,
+    sync_on_write: bool,
+}
+
+impl Wal {
+    /// Open (creating if needed) a WAL file at `path` for appending.
+    pub fn open(path: impl AsRef<Path>, sync_on_write: bool) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(&path)?;
+        Ok(Wal {
+            path,
+            file,
+            sync_on_write,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Append one record. In durable mode this fsyncs before returning, so a
+    /// successful `append` is a durability guarantee: the record survives a
+    /// crash from this point on, even if the memtable update that follows
+    /// never happens.
+    pub fn append(&mut self, record: &WalRecord) -> io::Result<()> {
+        let bytes = encode(record);
+        self.file.write_all(&bytes)?;
+        if self.sync_on_write {
+            self.file.sync_data()?;
+        }
+        Ok(())
+    }
