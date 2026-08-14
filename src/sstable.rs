@@ -173,3 +173,86 @@ impl SsTable {
             max_key,
         })
     }
+
+    /// Reopen an existing SSTable file written by a previous process (this
+    /// is the persistence half of crash recovery: SSTables are already
+    /// durable — flushed and `fsync`'d before being renamed into place — so
+    /// recovery just needs to rediscover and re-index them, not replay
+    /// anything).
+    pub fn open(path: impl AsRef<Path>, id: u64) -> io::Result<SsTable> {
+        let path = path.as_ref().to_path_buf();
+        let mut file = File::open(&path)?;
+        let file_len = file.metadata()?.len();
+        if file_len < FOOTER_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sstable file too short",
+            ));
+        }
+
+        file.seek(SeekFrom::Start(file_len - FOOTER_LEN))?;
+        let mut footer = [0u8; FOOTER_LEN as usize];
+        file.read_exact(&mut footer)?;
+        let data_len = u64::from_le_bytes(footer[0..8].try_into().unwrap());
+        let index_len = u64::from_le_bytes(footer[8..16].try_into().unwrap());
+        let meta_len = u64::from_le_bytes(footer[16..24].try_into().unwrap());
+        let bloom_len = u64::from_le_bytes(footer[24..32].try_into().unwrap());
+        let magic = u32::from_le_bytes(footer[32..36].try_into().unwrap());
+        if magic != MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bad sstable magic",
+            ));
+        }
+
+        file.seek(SeekFrom::Start(data_len))?;
+        let mut index_buf = vec![0u8; index_len as usize];
+        file.read_exact(&mut index_buf)?;
+        let mut sparse_index = Vec::new();
+        let mut off = 0usize;
+        while off < index_buf.len() {
+            let key_len = u32::from_le_bytes(index_buf[off..off + 4].try_into().unwrap()) as usize;
+            off += 4;
+            let key = index_buf[off..off + key_len].to_vec();
+            off += key_len;
+            let entry_offset = u64::from_le_bytes(index_buf[off..off + 8].try_into().unwrap());
+            off += 8;
+            sparse_index.push(SparseIndexEntry {
+                key,
+                offset: entry_offset,
+            });
+        }
+
+        file.seek(SeekFrom::Start(data_len + index_len))?;
+        let mut meta_buf = vec![0u8; meta_len as usize];
+        file.read_exact(&mut meta_buf)?;
+        let max_key_len = u32::from_le_bytes(meta_buf[0..4].try_into().unwrap()) as usize;
+        let max_key = if max_key_len > 0 {
+            Some(meta_buf[4..4 + max_key_len].to_vec())
+        } else {
+            None
+        };
+        let entry_count = u64::from_le_bytes(
+            meta_buf[4 + max_key_len..12 + max_key_len]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+
+        file.seek(SeekFrom::Start(data_len + index_len + meta_len))?;
+        let mut bloom_buf = vec![0u8; bloom_len as usize];
+        file.read_exact(&mut bloom_buf)?;
+        let bloom = BloomFilter::deserialize(&bloom_buf)?;
+
+        let min_key = sparse_index.first().map(|e| e.key.clone());
+
+        Ok(SsTable {
+            id,
+            path,
+            data_len,
+            sparse_index,
+            bloom,
+            entry_count,
+            min_key,
+            max_key,
+        })
+    }
