@@ -215,3 +215,51 @@ impl LsmTree {
 
         self.maybe_compact()
     }
+
+    fn maybe_compact(&mut self) -> io::Result<()> {
+        if self.sstables.len() >= self.opts.compaction_trigger {
+            self.compact()?;
+        }
+        Ok(())
+    }
+
+    /// Force a full compaction: merge every current SSTable into one new
+    /// SSTable, resolving duplicate keys in favor of the newest version and
+    /// permanently dropping any key whose newest version is a tombstone.
+    /// No-op if there are no SSTables at all.
+    pub fn compact(&mut self) -> io::Result<()> {
+        if self.sstables.is_empty() {
+            return Ok(());
+        }
+        let newest_first: Vec<&SsTable> = self.sstables.iter().rev().collect();
+        let merged = compaction::merge_tables_dropping_tombstones(&newest_first)?;
+
+        let new_id = self.next_sstable_id;
+        self.next_sstable_id += 1;
+        let new_path = self.dir.join(sstable_file_name(new_id));
+        let new_table = SsTable::build(
+            &new_path,
+            new_id,
+            merged.into_iter().map(|(k, v)| (k, Some(v))),
+            self.opts.sparse_index_interval,
+            self.opts.bloom_bits_per_key,
+            self.opts.bloom_enabled,
+        )?;
+
+        // Delete the superseded files oldest-first (ascending id — which is
+        // exactly the order `self.sstables` is already kept in). This
+        // ordering is a deliberate crash-safety invariant, not an arbitrary
+        // choice: for any key, a tombstone that shadows an older value
+        // always lives in a *higher*-id (more recent) table than that
+        // value. Deleting ascending guarantees a shadowing tombstone is
+        // never removed while the value it shadows is still on disk — so a
+        // crash at any point during this loop leaves a directory that,
+        // read via `open`, still returns correct answers (verified in
+        // `tests/crash_recovery.rs::compaction_partial_cleanup_is_still_safe`).
+        for old_table in &self.sstables {
+            let _ = fs::remove_file(old_table.path());
+        }
+
+        self.sstables = vec![new_table];
+        Ok(())
+    }
