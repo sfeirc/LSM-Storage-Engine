@@ -106,3 +106,92 @@ impl Wal {
         }
         Ok(())
     }
+
+    /// Replay every complete record in the WAL file at `path`, in order. A
+    /// truncated/corrupt final record is silently discarded (see module
+    /// docs) rather than treated as an error, since that's the expected
+    /// shape of a crash mid-write, not a bug.
+    pub fn replay(path: impl AsRef<Path>) -> io::Result<Vec<WalRecord>> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let mut records = Vec::new();
+
+        loop {
+            let start_pos = reader.stream_position()?;
+            match Self::read_one_record(&mut reader) {
+                Ok(Some(record)) => records.push(record),
+                Ok(None) => break, // clean EOF between records
+                Err(_) => {
+                    // Torn / corrupt tail record: rewind is unnecessary since
+                    // we stop reading entirely; just stop replay here.
+                    let _ = start_pos;
+                    break;
+                }
+            }
+        }
+        Ok(records)
+    }
+
+    fn read_one_record<R: Read>(reader: &mut R) -> io::Result<Option<WalRecord>> {
+        use io::ErrorKind;
+
+        let mut tag_buf = [0u8; 1];
+        match reader.read_exact(&mut tag_buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(e),
+        }
+        let mut record_bytes = vec![tag_buf[0]];
+
+        let read_u32 = |reader: &mut R, record_bytes: &mut Vec<u8>| -> io::Result<u32> {
+            let mut b = [0u8; 4];
+            reader.read_exact(&mut b)?;
+            record_bytes.extend_from_slice(&b);
+            Ok(u32::from_le_bytes(b))
+        };
+
+        let key_len = read_u32(reader, &mut record_bytes)? as usize;
+        if key_len > 64 * 1024 * 1024 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "key too large, likely corrupt",
+            ));
+        }
+        let mut key = vec![0u8; key_len];
+        reader.read_exact(&mut key)?;
+        record_bytes.extend_from_slice(&key);
+
+        let record = match tag_buf[0] {
+            0 => {
+                let value_len = read_u32(reader, &mut record_bytes)? as usize;
+                if value_len > 256 * 1024 * 1024 {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "value too large, likely corrupt",
+                    ));
+                }
+                let mut value = vec![0u8; value_len];
+                reader.read_exact(&mut value)?;
+                record_bytes.extend_from_slice(&value);
+                WalRecord::Put(key, value)
+            }
+            1 => WalRecord::Delete(key),
+            _ => return Err(io::Error::new(ErrorKind::InvalidData, "unknown WAL tag")),
+        };
+
+        let mut checksum_buf = [0u8; 4];
+        reader.read_exact(&mut checksum_buf)?;
+        let stored_checksum = u32::from_le_bytes(checksum_buf);
+        let computed = fnv1a_32(&record_bytes);
+        if stored_checksum != computed {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "WAL checksum mismatch",
+            ));
+        }
+        Ok(Some(record))
+    }
