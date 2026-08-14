@@ -293,3 +293,116 @@ impl LsmTree {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts_small() -> LsmOptions {
+        LsmOptions {
+            memtable_max_bytes: 64, // force frequent flushes in tests
+            sparse_index_interval: 2,
+            bloom_bits_per_key: 10,
+            bloom_enabled: true,
+            compaction_trigger: 3,
+            wal_sync: true,
+        }
+    }
+
+    #[test]
+    fn put_get_delete_within_memtable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tree = LsmTree::open(dir.path(), LsmOptions::default()).unwrap();
+        tree.put(b"a", b"1").unwrap();
+        assert_eq!(tree.get(b"a").unwrap(), Some(b"1".to_vec()));
+        tree.delete(b"a").unwrap();
+        assert_eq!(tree.get(b"a").unwrap(), None);
+    }
+
+    #[test]
+    fn flush_moves_data_to_sstable_and_read_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tree = LsmTree::open(dir.path(), LsmOptions::default()).unwrap();
+        tree.put(b"a", b"1").unwrap();
+        tree.put(b"b", b"2").unwrap();
+        tree.flush().unwrap();
+        assert_eq!(tree.memtable_len(), 0);
+        assert_eq!(tree.sstable_count(), 1);
+        assert_eq!(tree.get(b"a").unwrap(), Some(b"1".to_vec()));
+        assert_eq!(tree.get(b"b").unwrap(), Some(b"2".to_vec()));
+    }
+
+    #[test]
+    fn auto_flush_triggers_past_size_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tree = LsmTree::open(dir.path(), opts_small()).unwrap();
+        for i in 0..20u32 {
+            tree.put(format!("k{i}").as_bytes(), b"some-value-bytes")
+                .unwrap();
+        }
+        assert!(
+            tree.sstable_count() >= 1,
+            "expected at least one auto-flush to have happened"
+        );
+        for i in 0..20u32 {
+            let expected = b"some-value-bytes".to_vec();
+            assert_eq!(
+                tree.get(format!("k{i}").as_bytes()).unwrap(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn reopen_recovers_sstables_and_wal_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        {
+            let mut tree = LsmTree::open(&path, LsmOptions::default()).unwrap();
+            tree.put(b"a", b"1").unwrap();
+            tree.flush().unwrap();
+            tree.put(b"b", b"2").unwrap(); // stays in WAL only, never flushed
+        }
+        let tree2 = LsmTree::open(&path, LsmOptions::default()).unwrap();
+        assert_eq!(tree2.get(b"a").unwrap(), Some(b"1".to_vec()));
+        assert_eq!(tree2.get(b"b").unwrap(), Some(b"2".to_vec()));
+    }
+
+    #[test]
+    fn delete_after_flush_masks_older_sstable_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tree = LsmTree::open(dir.path(), LsmOptions::default()).unwrap();
+        tree.put(b"a", b"1").unwrap();
+        tree.flush().unwrap();
+        tree.delete(b"a").unwrap(); // tombstone in memtable, older sstable still has "1"
+        assert_eq!(tree.get(b"a").unwrap(), None);
+        tree.flush().unwrap(); // now tombstone is also in an sstable
+        assert_eq!(tree.get(b"a").unwrap(), None);
+    }
+
+    #[test]
+    fn compact_merges_and_drops_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tree = LsmTree::open(dir.path(), LsmOptions::default()).unwrap();
+        tree.put(b"a", b"1").unwrap();
+        tree.flush().unwrap();
+        tree.put(b"a", b"2").unwrap();
+        tree.flush().unwrap();
+        tree.delete(b"b_never_existed").unwrap();
+        tree.put(b"b_never_existed", b"3").unwrap();
+        tree.delete(b"b_never_existed").unwrap();
+        tree.flush().unwrap();
+        assert_eq!(tree.sstable_count(), 3);
+
+        tree.compact().unwrap();
+        assert_eq!(tree.sstable_count(), 1);
+        assert_eq!(tree.get(b"a").unwrap(), Some(b"2".to_vec())); // newest version won
+        assert_eq!(tree.get(b"b_never_existed").unwrap(), None);
+
+        let raw = tree.debug_all_sstable_entries().unwrap();
+        assert!(
+            raw.iter().all(|(_, k, _)| k != b"b_never_existed"),
+            "tombstone should be physically gone after compaction, found: {raw:?}"
+        );
+    }
+}
