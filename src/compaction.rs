@@ -61,3 +61,60 @@ impl PartialOrd for HeapItem {
         Some(self.cmp(other))
     }
 }
+
+/// Merge `tables` (must be passed newest-first: `tables[0]` is the most
+/// recently flushed/compacted) into a single sorted, deduplicated,
+/// tombstone-free stream of live entries.
+pub fn merge_tables_dropping_tombstones(
+    tables: &[&SsTable],
+) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut iters: Vec<SsTableIterator> = tables
+        .iter()
+        .map(|t| t.iter_all())
+        .collect::<io::Result<Vec<_>>>()?;
+
+    let mut heap: BinaryHeap<HeapItem> = BinaryHeap::new();
+    for (source, iter) in iters.iter_mut().enumerate() {
+        if let Some(next) = iter.next() {
+            let (key, value) = next?;
+            heap.push(HeapItem {
+                key,
+                value,
+                rank: source,
+                source,
+            });
+        }
+    }
+
+    let mut output = Vec::new();
+    let mut last_emitted_key: Option<Vec<u8>> = None;
+
+    while let Some(item) = heap.pop() {
+        // Pull the next entry from the same source and push it back, to
+        // keep every input stream flowing regardless of whether this
+        // popped item ends up emitted or discarded as a shadowed duplicate.
+        if let Some(next) = iters[item.source].next() {
+            let (key, value) = next?;
+            heap.push(HeapItem {
+                key,
+                value,
+                rank: item.rank,
+                source: item.source,
+            });
+        }
+
+        let is_new_key = last_emitted_key.as_deref() != Some(item.key.as_slice());
+        if is_new_key {
+            if let Some(value) = item.value {
+                output.push((item.key.clone(), value));
+            }
+            // else: newest version of this key is a tombstone -> permanently
+            // dropped, since this merge spans every existing table.
+            last_emitted_key = Some(item.key);
+        }
+        // else: an older table's version of a key already resolved by a
+        // newer table this pass — discarded, iterator already advanced above.
+    }
+
+    Ok(output)
+}
