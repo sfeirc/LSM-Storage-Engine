@@ -256,3 +256,41 @@ impl SsTable {
             max_key,
         })
     }
+
+    /// Look up `key`. Returns `Ok(Some(Some(value)))` if present,
+    /// `Ok(Some(None))` if this table records a tombstone for `key` (it was
+    /// deleted at or before this table's generation), or `Ok(None)` if this
+    /// table has no record of `key` at all (the caller should keep
+    /// searching older tables).
+    pub fn get(&self, key: &[u8]) -> io::Result<Option<Option<Vec<u8>>>> {
+        if !self.bloom.might_contain(key) {
+            return Ok(None);
+        }
+        if self.sparse_index.is_empty() {
+            return Ok(None);
+        }
+        // Rightmost sparse index entry with key <= target.
+        let idx = match self
+            .sparse_index
+            .binary_search_by(|e| e.key.as_slice().cmp(key))
+        {
+            Ok(i) => i,
+            Err(0) => return Ok(None), // target is before the first indexed key
+            Err(i) => i - 1,
+        };
+        let start_offset = self.sparse_index[idx].offset;
+
+        let mut file = File::open(&self.path)?;
+        let mut cursor = start_offset;
+        while cursor < self.data_len {
+            let (entry_key, value, next) = read_entry_at_stream(&mut file, cursor)?;
+            match entry_key.as_slice().cmp(key) {
+                std::cmp::Ordering::Equal => return Ok(Some(value)),
+                std::cmp::Ordering::Greater => return Ok(None), // sorted: passed where it would be
+                std::cmp::Ordering::Less => {
+                    cursor = next;
+                }
+            }
+        }
+        Ok(None)
+    }
