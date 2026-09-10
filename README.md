@@ -83,6 +83,10 @@ docker run --rm lsm-storage-engine
 - **No corruption checksums** beyond WAL torn-tail detection — an SSTable with bit-flipped bytes in the middle wouldn't be caught.
 - **No network/distribution** — this is the single-node storage layer, not a distributed database.
 
+## A note on this repo's commit history
+
+This repo's git history was reorganized after the fact into feature-scoped commits (WAL, memtable, SSTable format/flush, read path, compaction, bloom filters, tests alongside each) for readability. The code and the calendar date of development are authentic; the commit-by-commit timestamps and granularity were reconstructed to reflect the real build order, not recorded as they happened.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
